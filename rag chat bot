@@ -1,0 +1,134 @@
+# 1. Install necessary libraries
+!pip install -q langchain langchain-core chromadb groq gradio langchain_community langchain-groq sentence-transformers pypdf
+
+import os
+from groq import Groq
+from google.colab import userdata
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, CSVLoader
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+import gradio as gr
+
+# --- Step 1: Configuration & API Setup ---
+groq_api_key = userdata.get('GROQ_API_KEY')
+CHROMA_DIR = "chroma_db"
+
+# Initialize Embedding Model once (heavy operation)
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+# Initialize LLM
+llm = None
+if groq_api_key:
+    llm = ChatGroq(
+        groq_api_key=groq_api_key,
+        model_name="llama-3.3-70b-versatile",
+        temperature=0.2
+    )
+
+# Initialize/Load the Vector Store
+vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=embedding_model)
+
+# --- Step 2: Logic Functions ---
+
+def index_files(files):
+    if not files:
+        return "⚠️ No files uploaded."
+
+    docs = []
+    for file in files:
+        # Gradio 'file' object in multiple mode is a list of file objects
+        # In recent Gradio versions, file.name is the temporary path
+        path = file.name 
+        ext = path.lower().split(".")[-1]
+
+        try:
+            if ext == "pdf":
+                loader = PyPDFLoader(path)
+            elif ext == "txt":
+                loader = TextLoader(path)
+            elif ext == "csv":
+                loader = CSVLoader(file_path=path)
+            else:
+                continue
+            docs.extend(loader.load())
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+
+    if not docs:
+        return "❌ No valid text found in uploaded files."
+
+    # Split documents
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_documents(docs)
+    
+    # Add to Chroma
+    vectorstore.add_documents(chunks)
+    
+    return f"✅ Indexed {len(chunks)} chunks from {len(files)} files."
+
+def ask_question(query):
+    if not llm:
+        return "LLM not initialized. Check your Groq API key."
+
+    # Check if database has data
+    # We use a try-except because if the collection doesn't exist yet, .count() might fail
+    try:
+        count = vectorstore._collection.count()
+        if count == 0:
+            return "The vector database is empty. Please upload and index files first."
+    except:
+        return "Vector database not ready. Please upload files."
+
+    # Retrieval
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    docs = retriever.invoke(query)
+    
+    if not docs:
+        return "I couldn't find any relevant information in the uploaded documents."
+
+    context = "\n\n".join(d.page_content for d in docs)
+
+    # Prompt Template
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "Answer the user's question using ONLY the provided context. If the answer is not in the context, say you don't know."),
+        ("human", "Context:\n{context}\n\nQuestion:\n{question}")
+    ])
+
+    chain = prompt | llm
+    response = chain.invoke({"context": context, "question": query})
+    
+    return response.content
+
+# --- Step 3: UI Layout ---
+
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🔍 PragyanAI - RAG Chatbot (Groq + ChromaDB)")
+    gr.Markdown("Upload documents to build a knowledge base, then ask questions about them.")
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            file_upload = gr.File(
+                label="Step 1: Upload Documents",
+                file_types=[".pdf", ".txt", ".csv"],
+                file_count='multiple'
+            )
+            index_btn = gr.Button("📥 Index Files", variant="primary")
+            index_status = gr.Textbox(label="Status", interactive=False)
+
+        with gr.Column(scale=2):
+            question = gr.Textbox(label="Step 2: Ask a Question", placeholder="e.g., What is the main conclusion of the report?")
+            ask_btn = gr.Button("🤖 Get Answer", variant="secondary")
+            answer = gr.Textbox(label="Response", lines=10)
+
+    # Event handlers
+    index_btn.click(index_files, inputs=[file_upload], outputs=[index_status])
+    ask_btn.click(ask_question, inputs=[question], outputs=[answer])
+    question.submit(ask_question, inputs=[question], outputs=[answer])
+
+# Launch
+demo.launch(share=True, debug=True)
