@@ -1,9 +1,13 @@
 # 1. Install necessary libraries
 !pip install -q langchain langchain-core chromadb groq gradio langchain_community langchain-groq sentence-transformers pypdf
 
+
+import streamlit as st
 import os
+
+# For Streamlit deployment
+groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 from groq import Groq
-from google.colab import userdata
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, CSVLoader
 from langchain_community.vectorstores import Chroma
